@@ -495,3 +495,36 @@ class XtcePacketDefinition:
                     continue
 
             yield packet
+
+    def validate(self, schema_path) -> bool:
+        """Validate this XTCE document against the specified XML schema.
+
+        Parameters
+        ----------
+        schema_path : str or Path
+            Path of the .xsd/schema file to use for validation
+
+        Returns
+        -------
+        : bool
+            True if the document passes validation, False if not
+        """
+        schema_tree = ElementTree.parse(schema_path)
+        xtce_schema = ElementTree.XMLSchema(schema_tree)
+        try:
+            xtce_schema.assertValid(self.tree)
+            return True
+        except AssertionError as failure:
+            warnings.warn(f"XTCE schema validation failed: {failure}")
+            return False
+
+    @property
+    def xsd_url(self) -> str:
+        """Property accessor that returns the URL of the XSD (schema) specified in this document"""
+        key = f"{{{self.ns['xsi']}}}schemaLocation"
+        schema_loc = self.tree.getroot().attrib[key]
+        pairs = schema_loc.split()
+        for uri, location in [(pairs[i], pairs[i+1]) for i in range(0, len(pairs), 2)]:
+            if uri == self.ns["xtce"]:
+                return location
+        raise KeyError(f"No schemaLocation entry found for URI {self.ns['xtce']}")
