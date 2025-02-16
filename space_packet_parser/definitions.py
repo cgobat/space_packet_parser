@@ -6,6 +6,7 @@ import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import BinaryIO, Optional, TextIO, Union
+from urllib.request import urlopen
 
 # Installed
 import lxml.etree as ElementTree
@@ -496,20 +497,26 @@ class XtcePacketDefinition:
 
             yield packet
 
-    def validate(self, schema_path) -> bool:
+    def validate(self, schema_path=None) -> bool:
         """Validate this XTCE document against the specified XML schema.
 
         Parameters
         ----------
-        schema_path : str or Path
-            Path of the .xsd/schema file to use for validation
+        schema_path : str, Path, or None
+            Path of the schema file to use for validation. If None (default), use `.xsd_url` property to retrieve
+            XSD from the internet.
 
         Returns
         -------
         : bool
             True if the document passes validation, False if not
         """
-        schema_tree = ElementTree.parse(schema_path)
+        if schema_path is None:
+            with urlopen(self.xsd_url) as response:
+                schema_content = response.read()
+                schema_tree = ElementTree.XML(schema_content)
+        else:
+            schema_tree = ElementTree.parse(schema_path)
         xtce_schema = ElementTree.XMLSchema(schema_tree)
         try:
             xtce_schema.assertValid(self.tree)
@@ -520,7 +527,7 @@ class XtcePacketDefinition:
 
     @property
     def xsd_url(self) -> str:
-        """Property accessor that returns the URL of the XSD (schema) specified in this document"""
+        """Property accessor that returns the URL of the XTCE XSD (schema) specified in this document"""
         key = f"{{{self.ns['xsi']}}}schemaLocation"
         schema_loc = self.tree.getroot().attrib[key]
         pairs = schema_loc.split()
