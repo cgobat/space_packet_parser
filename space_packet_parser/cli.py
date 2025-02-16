@@ -10,12 +10,10 @@ Use
     spp --help
     spp --describe <packet_file>
 """
-# Standard
 import logging
 from pathlib import Path
 from typing import Optional
 
-# Installed
 import click
 from rich import pretty
 from rich.console import Console
@@ -24,10 +22,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 
-from space_packet_parser.definitions import DEFAULT_ROOT_CONTAINER, XtcePacketDefinition
-
-# Local
 from space_packet_parser.packets import ccsds_generator
+from space_packet_parser.xtce.definitions import DEFAULT_ROOT_CONTAINER, XtcePacketDefinition
 
 # Initialize a console instance for rich output
 console = Console()
@@ -79,16 +75,16 @@ def describe_xtce(
 ) -> None:
     """Describe the contents and structure of an XTCE packet definition file."""
     logging.debug(f"Describing XTCE file: {file_path}")
-    definition = XtcePacketDefinition(file_path, root_container_name=root_container)
+    definition = XtcePacketDefinition.from_xtce(file_path, root_container_name=root_container)
     tree = Tree(definition.root_container_name)
 
     # Recursively add nodes based on the inheritors of each container
     def add_nodes(tree_node, parent_key):
-        children = definition._sequence_container_cache[parent_key].inheritors
+        children = definition.containers[parent_key].inheritors
         for child_key in children:
             # Create a new child node (name + comparisons used to distinguish between containers)
             child_node = tree_node.add(
-                f"{child_key} {definition._sequence_container_cache[child_key].restriction_criteria}")
+                f"{child_key} {definition.containers[child_key].restriction_criteria}")
             # Recursively add any children of this child
             add_nodes(child_node, child_key)
 
@@ -96,16 +92,16 @@ def describe_xtce(
 
     console.print(Panel(tree, title="XTCE Container Layout", border_style="cyan", expand=False))
     if sequence_containers:
-        console.print(Panel(pretty.Pretty(definition._sequence_container_cache),
-                            title=f"Sequence Containers ({len(definition._sequence_container_cache)})",
+        console.print(Panel(pretty.Pretty(definition.containers),
+                            title=f"Sequence Containers ({len(definition.containers)})",
                             border_style="blue", expand=False))
     if parameters:
-        console.print(Panel(pretty.Pretty(definition._parameter_cache),
-                            title=f"Parameters ({len(definition._parameter_cache)})",
+        console.print(Panel(pretty.Pretty(definition.parameters),
+                            title=f"Parameters ({len(definition.parameters)})",
                             border_style="green", expand=False))
     if parameter_types:
-        console.print(Panel(pretty.Pretty(definition._parameter_type_cache),
-                            title=f"Parameter Types ({len(definition._parameter_type_cache)})",
+        console.print(Panel(pretty.Pretty(definition.parameter_types),
+                            title=f"Parameter Types ({len(definition.parameter_types)})",
                             border_style="magenta", expand=False))
 
 
@@ -174,7 +170,14 @@ def parse(
     logging.debug(f"Using packet definition file: {definition_file}")
 
     with open(packet_file, "rb") as f:
-        packets = list(XtcePacketDefinition(definition_file).packet_generator(f, skip_header_bytes=skip_header_bytes))
+        packets = list(
+            XtcePacketDefinition.from_xtce(
+                definition_file
+            ).packet_generator(
+                f,
+                skip_header_bytes=skip_header_bytes
+            )
+        )
 
     if packet is not None:
         if packet > len(packets):

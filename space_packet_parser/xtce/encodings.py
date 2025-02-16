@@ -1,39 +1,21 @@
 """DataEncoding definitions"""
-# Standard
-import struct
 import logging
+import struct
 import warnings
 from abc import ABCMeta, abstractmethod
 from typing import Optional, Union
 
 import lxml.etree as ElementTree
+from lxml.builder import ElementMaker
 
-# Local
-from space_packet_parser import calibrators, comparisons, packets
+from space_packet_parser import common, packets
+from space_packet_parser.xtce import calibrators, comparisons
 
 logger = logging.getLogger(__name__)
 
 
-class DataEncoding(comparisons.AttrComparable, metaclass=ABCMeta):
+class DataEncoding(common.AttrComparable, common.XmlObject, metaclass=ABCMeta):
     """Abstract base class for XTCE data encodings"""
-
-    @classmethod
-    @abstractmethod
-    def from_data_encoding_xml_element(cls, element: ElementTree.Element, ns: dict) -> 'DataEncoding':
-        """Abstract classmethod to create a data encoding object from an XML element.
-
-        Parameters
-        ----------
-        element : ElementTree.Element
-            XML element
-        ns : dict
-            XML namespace dict
-
-        Returns
-        -------
-        : DataEncoding
-        """
-        return NotImplemented
 
     @staticmethod
     def get_default_calibrator(data_encoding_element: ElementTree.Element,
@@ -57,7 +39,7 @@ class DataEncoding(comparisons.AttrComparable, metaclass=ABCMeta):
             # Try to find each type of data encoding element. If we find one, we assume it's the only one.
             element = data_encoding_element.find(f"xtce:DefaultCalibrator/xtce:{calibrator.__name__}", ns)
             if element is not None:
-                return calibrator.from_calibrator_xml_element(element, ns)
+                return calibrator.from_xml(element, ns=ns)
         return None
 
     @staticmethod
@@ -78,7 +60,7 @@ class DataEncoding(comparisons.AttrComparable, metaclass=ABCMeta):
             List of ContextCalibrator objects or None if there are no context calibrators
         """
         if (context_calibrators_elements := data_encoding_element.find('xtce:ContextCalibratorList', ns)) is not None:
-            return [calibrators.ContextCalibrator.from_context_calibrator_xml_element(el, ns)
+            return [calibrators.ContextCalibrator.from_xml(el, ns=ns)
                     for el in context_calibrators_elements]
         return None
 
@@ -143,9 +125,9 @@ class DataEncoding(comparisons.AttrComparable, metaclass=ABCMeta):
         : int
             Size of the data item in bits.
         """
-        raise NotImplementedError()
+        return NotImplemented
 
-    def parse_value(self, packet: packets.CCSDSPacket) -> packets.ParameterDataTypes:
+    def parse_value(self, packet: packets.CCSDSPacket) -> common.ParameterDataTypes:
         """Parse a value from packet data, possibly using previously parsed data items to inform parsing.
 
         Parameters
@@ -155,10 +137,10 @@ class DataEncoding(comparisons.AttrComparable, metaclass=ABCMeta):
             previously parsed data items to infer field lengths.
         Returns
         -------
-        : packets.ParameterDataTypes
+        : common.ParameterDataTypes
             Derived value with a `raw_value` attribute that can be used to get the original packet data.
         """
-        raise NotImplementedError()
+        return NotImplemented
 
 
 class StringDataEncoding(DataEncoding):
@@ -333,7 +315,7 @@ class StringDataEncoding(DataEncoding):
         ).to_bytes(buflen_bytes, "big")
         return raw_string_buffer
 
-    def parse_value(self, packet: packets.CCSDSPacket) -> packets.StrParameter:
+    def parse_value(self, packet: packets.CCSDSPacket) -> common.StrParameter:
         """Parse a string value from packet data, possibly using previously parsed data items to inform parsing.
 
         Parameters
@@ -368,10 +350,19 @@ class StringDataEncoding(DataEncoding):
             # Indicates there is no further parsing. The raw string value is the whole string value.
             parsed_string = raw_string_buffer.decode(self.encoding)
 
-        return packets.StrParameter(parsed_string, bytes(raw_string_buffer))
+        return common.StrParameter(parsed_string, bytes(raw_string_buffer))
 
     @classmethod
-    def from_data_encoding_xml_element(cls, element: ElementTree.Element, ns: dict) -> 'StringDataEncoding':
+    def from_xml(
+            cls,
+            element: ElementTree.Element,
+            *,
+            ns: dict,
+            tree: Optional[ElementTree.Element] = None,
+            parameter_lookup: Optional[dict[str, any]] = None,
+            parameter_type_lookup: Optional[dict[str, any]] = None,
+            container_lookup: Optional[dict[str, any]] = None
+    ) -> 'StringDataEncoding':
         """Create a data encoding object from an <xtce:StringDataEncoding> XML element.
 
         Notes
@@ -397,6 +388,14 @@ class StringDataEncoding(DataEncoding):
             XML element
         ns : dict
             XML namespace dict
+        tree: Optional[ElementTree.Element]
+            Ignored
+        parameter_lookup: Optional[dict]
+            Ignored
+        parameter_type_lookup: Optional[dict]
+            Ignored
+        container_lookup: Optional[dict[str, SequenceContainer]]
+            Ignored
 
         Returns
         -------
@@ -440,7 +439,7 @@ class StringDataEncoding(DataEncoding):
             elif size_element.find("xtce:DiscreteLookupList", ns) is not None:
                 # Raw string length is specified by lookup table based on another parameter
                 discrete_lookup_list_element = element.find('xtce:Variable/xtce:DiscreteLookupList', ns)
-                discrete_lookup_list = [comparisons.DiscreteLookup.from_discrete_lookup_xml_element(el, ns)
+                discrete_lookup_list = [comparisons.DiscreteLookup.from_xml(el, ns=ns)
                                         for el in discrete_lookup_list_element.findall('xtce:DiscreteLookup', ns)]
                 init_kwargs["discrete_lookup_length"] = discrete_lookup_list
             else:
@@ -459,10 +458,76 @@ class StringDataEncoding(DataEncoding):
 
         return cls(**init_kwargs)
 
+    def to_xml(self, *, elmaker: ElementMaker) -> ElementTree.Element:
+        """Create a data encoding XML element
+
+        Parameters
+        ----------
+        elmaker: ElementMaker
+            Element factory with predefined namespace
+
+        Returns
+        -------
+        : ElementTree.Element
+        """
+        element = elmaker.StringDataEncoding(encoding=self.encoding)
+
+        if self.fixed_length:
+            size_element = elmaker.SizeInBits(
+                elmaker.Fixed(
+                    elmaker.FixedValue(str(self.fixed_length))
+                )
+            )
+        else:
+            size_element = elmaker.Variable()
+            if self.dynamic_length_reference:
+                dynamic_value_element = elmaker.DynamicValue(
+                    elmaker.ParameterInstanceRef(
+                        parameterRef=self.dynamic_length_reference,
+                        useCalibratedValue=str(self.use_calibrated_value).lower(),
+                    )
+                )
+
+                if self.length_linear_adjuster:
+                    intercept = self.length_linear_adjuster(0)  # f(0)
+                    slope = self.length_linear_adjuster(1) - intercept  # ( f(1) - f(0) ) / (1 - 0)
+                    dynamic_value_element.append(
+                        elmaker.LinearAdjustment(
+                            intercept=str(intercept),
+                            slope=str(slope),
+                        )
+                    )
+
+                size_element.append(dynamic_value_element)
+
+            elif self.discrete_lookup_length:
+                size_element.append(
+                    elmaker.DiscreteLookupList(
+                        *(dl.to_xml(elmaker=elmaker) for dl in self.discrete_lookup_length)
+                    )
+                )
+
+            else:
+                raise ValueError("Variable element must contain either DynamicValue or DiscreteLookupList.")
+
+        if self.leading_length_size:
+            size_element.append(
+                elmaker.LeadingSize(sizeInBitsOfSizeTag=str(self.leading_length_size))
+            )
+
+        if self.termination_character:
+            size_element.append(
+                elmaker.TerminationChar(self.termination_character.hex())
+            )
+
+        element.append(size_element)
+
+        return element
+
 
 class NumericDataEncoding(DataEncoding, metaclass=ABCMeta):
     """Abstract class that is inherited by IntegerDataEncoding and FloatDataEncoding"""
-    _data_return_class = packets.FloatParameter
+    _data_return_class = common.FloatParameter
 
     def __init__(self,
                  size_in_bits: int,
@@ -515,7 +580,7 @@ class NumericDataEncoding(DataEncoding, metaclass=ABCMeta):
         : int
             Raw value
         """
-        raise NotImplementedError()
+        return NotImplemented
 
     @staticmethod
     def _twos_complement(val: int, bit_width: int) -> int:
@@ -528,7 +593,7 @@ class NumericDataEncoding(DataEncoding, metaclass=ABCMeta):
 
     def parse_value(self,
                     packet: packets.CCSDSPacket,
-                    ) -> Union[packets.FloatParameter, packets.IntParameter]:
+                    ) -> Union[common.FloatParameter, common.IntParameter]:
         """Parse a value from packet data, possibly using previously parsed data items to inform parsing.
 
         Parameters
@@ -538,7 +603,7 @@ class NumericDataEncoding(DataEncoding, metaclass=ABCMeta):
             previously parsed data items to infer field lengths.
         Returns
         -------
-        : packets.FloatParameter or packets.IntParameter
+        : common.FloatParameter or common.IntParameter
             Parsed data item as either a float or integer depending on the type of encoding.
         """
         parsed_value = self._get_raw_value(packet)
@@ -549,17 +614,51 @@ class NumericDataEncoding(DataEncoding, metaclass=ABCMeta):
                 if all(criterion.evaluate(packet, parsed_value) for criterion in match_criteria):
                     # If the parsed data so far satisfy all the match criteria
                     calibrated_value = calibrator.calibrate(parsed_value)
-                    return packets.FloatParameter(calibrated_value, parsed_value)
+                    return common.FloatParameter(calibrated_value, parsed_value)
         if self.default_calibrator:  # If no context calibrators or if none apply and there is a default
             calibrated_value = self.default_calibrator.calibrate(parsed_value)
-            return packets.FloatParameter(calibrated_value, parsed_value)
+            return common.FloatParameter(calibrated_value, parsed_value)
         # No calibrations applied, we need to determine if it's an int or a float encoding calling this routine
         return self._data_return_class(parsed_value)
+
+    def to_xml(self, *, elmaker: ElementMaker) -> ElementTree.Element:
+        """Create a data encoding XML element
+
+        Parameters
+        ----------
+        elmaker: ElementMaker
+            Element factory with predefined namespace
+
+        Returns
+        -------
+        : ElementTree.Element
+        """
+        element = getattr(elmaker, self.__class__.__name__)(
+            sizeInBits=str(self.size_in_bits),
+            encoding=self.encoding,
+            byteOrder=self.byte_order,
+        )
+
+        if self.default_calibrator:
+            element.append(
+                elmaker.DefaultCalibrator(
+                    self.default_calibrator.to_xml(elmaker=elmaker)
+                )
+            )
+
+        if self.context_calibrators:
+            element.append(
+                elmaker.ContextCalibratorList(
+                    *(cal.to_xml(elmaker=elmaker) for cal in self.context_calibrators)
+                )
+            )
+
+        return element
 
 
 class IntegerDataEncoding(NumericDataEncoding):
     """<xtce:IntegerDataEncoding>"""
-    _data_return_class = packets.IntParameter
+    _data_return_class = common.IntParameter
 
     def _get_raw_value(self, packet: packets.CCSDSPacket) -> int:
         # Extract the bits from the data in big-endian order from the packet
@@ -579,7 +678,16 @@ class IntegerDataEncoding(NumericDataEncoding):
         return self._twos_complement(val, self.size_in_bits)
 
     @classmethod
-    def from_data_encoding_xml_element(cls, element: ElementTree.Element, ns: dict) -> 'IntegerDataEncoding':
+    def from_xml(
+            cls,
+            element: ElementTree.Element,
+            *,
+            ns: dict,
+            tree: Optional[ElementTree.Element] = None,
+            parameter_lookup: Optional[dict[str, any]] = None,
+            parameter_type_lookup: Optional[dict[str, any]] = None,
+            container_lookup: Optional[dict[str, any]] = None
+    ) -> 'IntegerDataEncoding':
         """Create a data encoding object from an <xtce:IntegerDataEncoding> XML element.
 
         Parameters
@@ -588,6 +696,14 @@ class IntegerDataEncoding(NumericDataEncoding):
             XML element
         ns : dict
             XML namespace dict
+        tree: Optional[ElementTree.Element]
+            Ignored
+        parameter_lookup: Optional[dict]
+            Ignored
+        parameter_type_lookup: Optional[dict]
+            Ignored
+        container_lookup: Optional[dict[str, SequenceContainer]]
+            Ignored
 
         Returns
         -------
@@ -606,7 +722,7 @@ class FloatDataEncoding(NumericDataEncoding):
     """<xtce:FloatDataEncoding>"""
     _allowed_encodings = ['IEEE754_1985', 'IEEE754', 'MILSTD_1750A', 'DEC', 'IBM', 'TI']
     _supported_encodings = _allowed_encodings[:3] # expand this if/when support for other float types is added
-    _data_return_class = packets.FloatParameter
+    _data_return_class = common.FloatParameter
 
     def __init__(
             self,
@@ -714,7 +830,16 @@ class FloatDataEncoding(NumericDataEncoding):
         return self.parse_func(data)
 
     @classmethod
-    def from_data_encoding_xml_element(cls, element: ElementTree.Element, ns: dict) -> 'FloatDataEncoding':
+    def from_xml(
+            cls,
+            element: ElementTree.Element,
+            *,
+            ns: dict,
+            tree: Optional[ElementTree.Element] = None,
+            parameter_lookup: Optional[dict[str, any]] = None,
+            parameter_type_lookup: Optional[dict[str, any]] = None,
+            container_lookup: Optional[dict[str, any]] = None
+    ) -> 'FloatDataEncoding':
         """Create a data encoding object from an <xtce:FloatDataEncoding> XML element.
 
         Parameters
@@ -723,6 +848,14 @@ class FloatDataEncoding(NumericDataEncoding):
             XML element
         ns : dict
             XML namespace dict
+        tree: Optional[ElementTree.Element]
+            Ignored
+        parameter_lookup: Optional[dict]
+            Ignored
+        parameter_type_lookup: Optional[dict]
+            Ignored
+        container_lookup: Optional[dict[str, SequenceContainer]]
+            Ignored
 
         Returns
         -------
@@ -804,7 +937,7 @@ class BinaryDataEncoding(DataEncoding):
             len_bits = self.linear_adjuster(len_bits)
         return len_bits
 
-    def parse_value(self, packet: packets.CCSDSPacket) -> packets.BinaryParameter:
+    def parse_value(self, packet: packets.CCSDSPacket) -> common.BinaryParameter:
         """Parse a value from packet data, possibly using previously parsed data items to inform parsing.
 
         Parameters
@@ -815,15 +948,24 @@ class BinaryDataEncoding(DataEncoding):
 
         Returns
         -------
-        : packets.BinaryParameter
+        : common.BinaryParameter
             Parsed binary data item.
         """
         nbits = self._calculate_size(packet)
         parsed_value = packet.raw_data.read_as_bytes(nbits)
-        return packets.BinaryParameter(parsed_value)
+        return common.BinaryParameter(parsed_value)
 
     @classmethod
-    def from_data_encoding_xml_element(cls, element: ElementTree.Element, ns: dict) -> 'BinaryDataEncoding':
+    def from_xml(
+            cls,
+            element: ElementTree.Element,
+            *,
+            ns: dict,
+            tree: Optional[ElementTree.Element] = None,
+            parameter_lookup: Optional[dict[str, any]] = None,
+            parameter_type_lookup: Optional[dict[str, any]] = None,
+            container_lookup: Optional[dict[str, any]] = None
+    ) -> 'BinaryDataEncoding':
         """Create a data encoding object from an <xtce:BinaryDataEncoding> XML element.
 
         Parameters
@@ -832,6 +974,14 @@ class BinaryDataEncoding(DataEncoding):
             XML element
         ns : dict
             XML namespace dict
+        tree: Optional[ElementTree.Element]
+            Ignored
+        parameter_lookup: Optional[dict]
+            Ignored
+        parameter_type_lookup: Optional[dict]
+            Ignored
+        container_lookup: Optional[dict[str, SequenceContainer]]
+            Ignored
 
         Returns
         -------
@@ -855,9 +1005,60 @@ class BinaryDataEncoding(DataEncoding):
 
         discrete_lookup_list_element = element.find('xtce:SizeInBits/xtce:DiscreteLookupList', ns)
         if discrete_lookup_list_element is not None:
-            discrete_lookup_list = [comparisons.DiscreteLookup.from_discrete_lookup_xml_element(el, ns)
+            discrete_lookup_list = [comparisons.DiscreteLookup.from_xml(el, ns=ns)
                                     for el in discrete_lookup_list_element.findall('xtce:DiscreteLookup', ns)]
             return cls(size_discrete_lookup_list=discrete_lookup_list)
 
         raise ValueError("Tried parsing a binary parameter length using Fixed, Dynamic, and DiscreteLookupList "
                          "but failed. See 3.4.5 of the XTCE Green Book CCSDS 660.1-G-2.")
+
+    def to_xml(self, *, elmaker: ElementMaker) -> ElementTree.Element:
+        """Create a data encoding XML element
+
+        Parameters
+        ----------
+        elmaker : ElementMaker
+            Element factory with predefined namespace
+
+        Returns
+        -------
+        : ElementTree.Element
+        """
+        if self.fixed_size_in_bits:
+            return elmaker.BinaryDataEncoding(
+                elmaker.SizeInBits(
+                    elmaker.FixedValue(str(self.fixed_size_in_bits))
+                )
+            )
+
+        size_in_bits = elmaker.SizeInBits()
+        element = elmaker.BinaryDataEncoding(size_in_bits)
+
+        if self.size_reference_parameter:
+            dynamic_value = elmaker.DynamicValue(
+                elmaker.ParameterInstanceRef(
+                    parameterRef=self.size_reference_parameter,
+                    useCalibratedValue=str(self.use_calibrated_value).lower(),
+                )
+            )
+
+            if self.linear_adjuster:
+                intercept = self.linear_adjuster(0)
+                slope = self.linear_adjuster(1) - intercept
+                dynamic_value.append(
+                    elmaker.LinearAdjustment(
+                        intercept=str(intercept),
+                        slope=str(slope),
+                    )
+                )
+
+            size_in_bits.append(dynamic_value)
+
+        if self.size_discrete_lookup_list:
+            size_in_bits.append(
+                elmaker.DiscreteLookupList(
+                    *(dl.to_xml(elmaker=elmaker) for dl in self.size_discrete_lookup_list)
+                )
+            )
+
+        return element
