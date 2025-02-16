@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO, Optional, TextIO, Union
-from urllib.request import urlopen
+from urllib.request import pathname2url, urlopen
 
 import lxml.etree as ElementTree
 from lxml.builder import ElementMaker
@@ -29,6 +29,48 @@ TAG_TO_TYPE_TEMPLATE = {
         'AbsoluteTimeParameterType': parameter_types.AbsoluteTimeParameterType,
         'RelativeTimeParameterType': parameter_types.RelativeTimeParameterType,
     }
+
+
+def get_schema_url(tree: ElementTree.ElementTree, schema_uri: str) -> str:
+    root = tree.getroot()
+    key = f"{{{root.nsmap['xsi']}}}schemaLocation"
+    schema_loc = root.attrib[key]
+    pairs = schema_loc.split()
+    for uri, location in [(pairs[i], pairs[i+1]) for i in range(0, len(pairs), 2)]:
+        if uri == schema_uri:
+            return location
+    raise KeyError(f"No schemaLocation entry found for URI {schema_uri}")
+
+def validate_against_schema(tree: ElementTree.ElementTree, schema_path: "str|Path" = None) -> bool:
+    """Validate an XTCE document against a specified XML schema.
+
+    Parameters
+    ----------
+    schema_path : str, Path, or None
+        Path of the schema file to use for validation. If None (default), use `get_schema_url` function to retrieve
+        XSD from the internet.
+
+    Returns
+    -------
+    : bool
+        True if the document passes validation, False if not
+    """
+    root = tree.getroot()
+    if schema_path is None:
+        url_list = [get_schema_url(tree, uri) for prefix, uri in root.nsmap.items() if prefix!="xsi"]
+    else:
+        url_list = [f"file:{pathname2url(schema_path)}"]
+    for schema_url in url_list:
+        with urlopen(schema_url) as response:
+            schema_content = response.read()
+        schema_tree = ElementTree.XML(schema_content)
+        xml_schema = ElementTree.XMLSchema(schema_tree)
+        try:
+            xml_schema.assertValid(tree)
+            return True
+        except AssertionError as failure:
+            warnings.warn(f"XML schema validation failed: {failure}")
+            return False
 
 
 class XtcePacketDefinition(common.AttrComparable):
@@ -553,42 +595,3 @@ class XtcePacketDefinition(common.AttrComparable):
                     continue
 
             yield packet
-
-    def validate(self, schema_path=None) -> bool:
-        """Validate this XTCE document against a specified XML schema.
-
-        Parameters
-        ----------
-        schema_path : str, Path, or None
-            Path of the schema file to use for validation. If None (default), use `.xsd_url` property to retrieve
-            XSD from the internet.
-
-        Returns
-        -------
-        : bool
-            True if the document passes validation, False if not
-        """
-        if schema_path is None:
-            with urlopen(self.xsd_url) as response:
-                schema_content = response.read()
-                schema_tree = ElementTree.XML(schema_content)
-        else:
-            schema_tree = ElementTree.parse(schema_path)
-        xtce_schema = ElementTree.XMLSchema(schema_tree)
-        try:
-            xtce_schema.assertValid(self.tree)
-            return True
-        except AssertionError as failure:
-            warnings.warn(f"XTCE schema validation failed: {failure}")
-            return False
-
-    @property
-    def xsd_url(self) -> str:
-        """Property accessor that returns the URL of the XTCE XSD (schema) specified in this document"""
-        key = f"{{{self.ns['xsi']}}}schemaLocation"
-        schema_loc = self.tree.getroot().attrib[key]
-        pairs = schema_loc.split()
-        for uri, location in [(pairs[i], pairs[i+1]) for i in range(0, len(pairs), 2)]:
-            if uri == self.ns["xtce"]:
-                return location
-        raise KeyError(f"No schemaLocation entry found for URI {self.ns['xtce']}")
